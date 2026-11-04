@@ -1,0 +1,16 @@
+# Build output - GitHub Actions rebuilds these
+.build_env/
+build/
+dist/
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local settings, recordings, logs
+*.log
+*.wav
+settings.json

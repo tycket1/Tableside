@@ -1,0 +1,16 @@
+# Runtime
+pyaudiowpatch>=0.2.12; sys_platform == "win32"
+faster-whisper>=1.1
+av>=12,<19            # av 19 breaks faster-whisper's audio decoding
+onnxruntime>=1.20
+sherpa-onnx>=1.12
+onnxruntime-genai>=0.10   # built-in AI summaries
+python-docx>=1.1
+openpyxl>=3.1
+numpy
+sv-ttk>=2.6
+darkdetect>=0.8
+keyring>=24
+send2trash>=1.8
+pystray>=0.19
+pillow>=10

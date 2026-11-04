@@ -1,0 +1,37 @@
+# Optional: if this folder is pushed to GitHub, every push builds TablesideSetup.exe
+# automatically. Download it from the run's "Artifacts" section (Actions tab).
+name: Build Windows installer
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+      - name: Build Tableside.exe
+        run: python -m PyInstaller --noconfirm --clean tableside.spec
+      - name: Smoke test the frozen app
+        shell: pwsh
+        run: |
+          Start-Process -FilePath dist/Tableside/Tableside.exe -ArgumentList "--selftest" -Wait
+          Get-Content "$env:LOCALAPPDATA/Tableside/selftest.txt"
+          if (!(Select-String -Path "$env:LOCALAPPDATA/Tableside/selftest.txt" -Pattern "PASS" -Quiet)) { throw "selftest failed" }
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build installer
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TablesideSetup
+          path: dist/TablesideSetup.exe
