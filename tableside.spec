@@ -17,7 +17,7 @@ for pkg in ("faster_whisper", "ctranslate2", "sherpa_onnx", "onnxruntime", "sv_t
 for f in ("first_names.txt", "tableside.ico", "tableside.png", "icon_24.png", "icon_32.png", "icon_64.png", "icon_128.png"):
     datas.append((f"app/{f}", "."))
 
-hiddenimports += ["pyaudiowpatch", "winsound", "pystray._win32", "watcher", "keyring.backends.Windows", "engine", "recorder"]
+hiddenimports += ["pyaudiowpatch", "winsound", "pystray._win32", "watcher", "keyring.backends.Windows", "engine", "recorder", "worker"]
 
 a = Analysis(
     ["app/tableside.py"],

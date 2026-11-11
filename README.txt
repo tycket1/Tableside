@@ -60,6 +60,8 @@ USING IT
     [x] Transcript        who said what, with timestamps
     [ ] AI summary        overview, decisions, action items
 - Press Stop when the call ends. Tableside transcribes in the background.
+  You can start your next recording right away; the earlier meeting keeps
+  processing and your PC gives the new recording priority.
 - If it can't work out a voice, it asks you to name it (press the play
   button to hear each one).
 - Notes are saved in  Documents\Tableside\  (Word + Excel, Times New Roman 11).

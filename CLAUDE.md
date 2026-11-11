@@ -17,7 +17,8 @@ Tableside is a Windows desktop app that takes meeting notes for Zoom, Teams, or 
 
 | Path | What it is |
 |---|---|
-| `app/tableside.py` | Tk GUI: main window, dialogs, pop-ups, tray, job worker, single-instance handling, `--selftest` (about 2,550 lines) |
+| `app/tableside.py` | Tk GUI: main window, dialogs, pop-ups, tray, single-instance handling, `--selftest` (about 2,330 lines) |
+| `app/worker.py` | Background worker process: transcribes and summarizes meetings (`Worker._process`, `Worker._summarize`); `JobRunner` starts it from the GUI |
 | `app/engine.py` | Everything that isn't GUI: transcription, speaker detection, voice memory, name guessing, trimming, summaries, Word/Excel export (about 1,600 lines) |
 | `app/recorder.py` | WASAPI loopback and mic capture, saved as 16 kHz mono WAV |
 | `app/watcher.py` | Detects a call starting (an app is using the mic); "Start with Windows" registry key |
@@ -85,7 +86,7 @@ Every push also builds the installer on GitHub Actions (Actions tab, then the la
 
 Use `E.palette_name(key, names)` to show a key; unnamed keys display as "Speaker N" and "Me". Always read and modify meetings through `E.read_meeting()` and `E.write_meeting()`, which writes atomically; `folder` is added on read and stripped on write.
 
-## How a meeting is processed (`App._process` in tableside.py)
+## How a meeting is processed (`Worker._process` in worker.py)
 
 1. **Auto-trim** (live recordings only, setting `auto_trim`): `E.auto_trim_bounds()` cuts more than 60 s of silence at either end before transcribing. Undoing an automatic trim triggers a full re-transcribe.
 2. **Whisper**: `E.load_whisper()` uses faster-whisper on CPU with int8; the default model is `small.en`.
@@ -116,7 +117,11 @@ Use `E.palette_name(key, names)` to show a key; unnamed keys display as "Speaker
 ## Threads and the main event loop (important)
 
 - Tk is single-threaded. **Background threads must never touch widgets.** Hand UI work back with `App.post(kind, ...)`; `App._poll()` drains the queue every 150 ms. Use `self.app.post("call", fn)` to run any function on the Tk thread. A dialog stuck on "Reading the recording…" turned out to be a background thread calling `widget.after()`; replacing those calls with `post("call", fn)` fixed it.
-- The job worker thread consumes `self.jobs`, which holds `("process", folder, live)` and `("summary", folder, False)` jobs.
+- **Transcription and summaries run in a separate process**, not a thread. `App.jobs` is a `worker.JobRunner`, and `jobs.put(("process", folder, live))` or `("summary", folder, False)` sends the job along with a snapshot of the settings. The worker process (`worker.run`) runs at below-normal priority, keeps Whisper and the speaker models loaded between jobs, and sends back the same message tuples `_poll()` handles. Why: sherpa-onnx's `diarize()` holds Python's GIL for long stretches (9 s at once on a 4.5-minute test call, so roughly 2 minutes for an hour-long one). On a thread, that froze the window and starved a new recording's audio callbacks. Measured after the change: longest main-thread stall 14 ms.
+  - If the worker dies (crash or out of memory), `JobRunner._recover()` fails that one meeting with a plain message, starts a new worker, and requeues the remaining jobs.
+  - The worker quits by itself within 2 s if the app process is gone, and `main()` calls `jobs.stop()` after the main loop. So no orphaned `Tableside.exe` is left running.
+  - `main()` must call `multiprocessing.freeze_support()` first: the frozen worker is `Tableside.exe` started again with multiprocessing arguments.
+  - `worker.py` must stay free of GUI imports. Code in the worker can't touch `App` state; it reads and writes `meeting.json` and posts messages.
 - The watcher thread polls `watcher.meeting_apps_in_call()` every 2 s and posts `("mics", frozenset)`, which drives `MeetingToast` (call started) and `CallEndedToast` (call ended or 10 minutes of silence).
 - The tray icon runs through `pystray` (`run_detached`). Tray menu actions post `("tray", action)`.
 - Single instance: a localhost TCP listener; its port is in `instance.port`. A second launch sends `show` (or `ping` for `--background`) and exits.

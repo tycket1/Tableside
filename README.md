@@ -16,6 +16,7 @@ Windows may say "Windows protected your PC" because the app isn't signed with a 
 - **Who said what**: recognizes voices you've named before, and picks up names from the conversation ("Thanks, Bob.").
 - **AI summary** (overview, decisions, action items) using a built-in offline model, Claude (your own API key), or Ollama.
 - **Trim** silence at the start/end, import existing recordings, and stop automatically after 10 minutes of silence.
+- **Back-to-back meetings**: transcription runs in a separate low-priority process, so you can start the next recording while the last one is still being processed.
 - Notes are saved in `Documents\Tableside\`.
 
 > Tell people you're recording. California requires everyone's consent.

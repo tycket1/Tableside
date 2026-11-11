@@ -29,6 +29,7 @@ import numpy as np
 import engine as E
 import recorder as R
 import watcher as W
+import worker as WK
 
 RES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 IS_WINDOWS = sys.platform == "win32"
@@ -88,9 +89,7 @@ def open_path(path) -> None:
         pass
 
 
-def track_path(meeting: dict, track: dict) -> Path:
-    p = Path(track["file"])
-    return p if p.is_absolute() else Path(meeting["folder"]) / p
+track_path = WK.track_path
 
 
 def speaker_colors(meeting: dict) -> dict:
@@ -102,10 +101,7 @@ def speaker_colors(meeting: dict) -> dict:
     return colors
 
 
-def unnamed_speakers(meeting: dict) -> list[str]:
-    names = meeting.get("names", {})
-    keys = dict.fromkeys(k for _s, _e, k, _t in meeting.get("segments", []))
-    return [k for k in keys if k.startswith("S") and not names.get(k)]
+unnamed_speakers = WK.unnamed_speakers
 
 
 # --------------------------------------------------------------------------- #
@@ -165,7 +161,7 @@ class App:
         self._bg_tip_shown = False
         self.settings = load_settings()
         self.msgs: queue.Queue = queue.Queue()
-        self.jobs: queue.Queue = queue.Queue()
+        self.jobs: WK.JobRunner | None = None   # started below
         self.meetings: dict[str, dict] = {}
         self.progress: dict[str, tuple] = {}
         self.errors: dict[str, str] = {}
@@ -173,9 +169,6 @@ class App:
         self.session: dict | None = None
         self.recorders: list = []
         self.pa = None
-        self._whisper = None
-        self._whisper_name = None
-        self._speakers = None
         self._suppress_select = False
         self.dots: list = []   # coloured classic labels to repaint after theme changes
 
@@ -191,7 +184,8 @@ class App:
         self.refresh_library()
         self.show_home()
 
-        threading.Thread(target=self._worker_loop, daemon=True).start()
+        # transcription and summaries run in their own process so this window never freezes
+        self.jobs = WK.JobRunner(self.post, lambda: self.settings)
         threading.Thread(target=self._watch_loop, daemon=True).start()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(120, self._poll)
@@ -1016,221 +1010,6 @@ class App:
     # --------------------------------------------------------- background work
     def post(self, *msg):
         self.msgs.put(msg)
-
-    def _worker_loop(self):
-        while True:
-            kind, folder, live = self.jobs.get()
-            try:
-                if kind == "process":
-                    self._process(folder, live)
-                else:
-                    self._summarize(folder)
-            except Exception as e:
-                traceback.print_exc()
-                m = E.read_meeting(Path(folder))
-                if m:
-                    m["status"] = "error"
-                    m["error"] = str(e)
-                    E.write_meeting(m)
-                self.post("error", folder, f"{'Transcription' if kind == 'process' else 'AI summary'} "
-                                           f"failed: {e}")
-            finally:
-                self.post("refresh", folder)
-
-    def _get_whisper(self, name, prog):
-        if self._whisper_name != name:
-            prog(0.01, f"Loading the speech model “{name}”…")
-            self._whisper = E.load_whisper(name, log=lambda text: prog(None, text))
-            self._whisper_name = name
-        return self._whisper
-
-    def _get_speakers(self, prog):
-        if self._speakers is None:
-            self._speakers = E.SpeakerEngine(log=lambda t: prog(None, t))
-        return self._speakers
-
-    def _process(self, folder: str, live: bool):
-        settings = dict(self.settings)
-        m = E.read_meeting(Path(folder))
-        m["status"] = "processing"
-        m.pop("error", None)
-        E.write_meeting(m)
-        self.post("refresh", folder)
-        opts = E.options(m)
-        if live and settings.get("auto_trim", True) and "untrimmed" not in m:
-            self.post("progress", folder, 1, "Checking for long silences…")
-            try:   # cut dead air before transcribing it (saves time, too)
-                bounds = E.auto_trim_bounds(m)
-                if bounds:
-                    E.trim_meeting(m, *bounds, auto=True)
-                    E.write_meeting(m)
-            except Exception:
-                traceback.print_exc()
-
-        state = {"base": 0.0, "span": 1.0}
-
-        def prog(frac, text):
-            if frac is not None:
-                pct = 100 * (state["base"] + state["span"] * max(0.0, min(1.0, frac)))
-            else:
-                pct = self.progress.get(folder, (0, ""))[0]
-            self.post("progress", folder, pct, text)
-
-        def phase(base, span):
-            state["base"], state["span"] = base, span
-
-        meeting_tracks = [track_path(m, t) for t in m["tracks"] if t["kind"] == "meeting"]
-        mic_tracks = [track_path(m, t) for t in m["tracks"] if t["kind"] == "me"]
-        for p in meeting_tracks + mic_tracks:
-            if not p.exists():
-                raise RuntimeError(f"The audio file is missing: {p}")
-        detect = settings.get("detect_speakers", True)
-        mic_share = 0.3 if mic_tracks else 0.0
-        phase(0, 0.05)
-        whisper = self._get_whisper(settings["whisper_model"], prog)
-
-        segments: list[E.Segment] = []
-        names: dict = {}
-        fingerprints: dict = {}
-        duration = m.get("duration") or 0.0
-        span_each = (0.95 - mic_share) / max(1, len(meeting_tracks))
-        base = 0.05
-        for path in meeting_tracks:
-            phase(base, span_each * 0.1)
-            prog(0, "Reading the meeting audio…")
-            audio = E.load_audio(path)
-            duration = max(duration, len(audio) / E.SR)
-            turns = []
-            if detect and len(audio) > E.SR:
-                phase(base + span_each * 0.1, span_each * 0.3)
-                try:
-                    eng = self._get_speakers(prog)
-                    prog(0, "Telling the voices apart…")
-                    turns = eng.diarize(audio, 0, progress=lambda f: prog(f, "Telling the voices apart…"))
-                    # merge groups that are really the same person (voices vary over a call)
-                    turns, _ = E.tidy_turns(turns, eng.speaker_fingerprints(audio, turns))
-                except Exception as e:
-                    traceback.print_exc()
-                    self.post("note", folder, f"Speaker detection was skipped: {e}")
-                    turns = []
-            phase(base + span_each * 0.4, span_each * 0.6)
-            prog(0, "Transcribing the meeting…")
-            asr, _ = E.transcribe(whisper, audio, words=bool(turns),
-                                  progress=lambda f: prog(f, f"Transcribing the meeting… {int(f * 100)}%"))
-            if turns:
-                segs = E.assign_speakers(asr, turns)
-                try:
-                    fingerprints.update(self._get_speakers(prog).speaker_fingerprints(audio, turns))
-                except Exception:
-                    traceback.print_exc()
-            else:
-                segs = [E.Segment(a["start"], a["end"], "S1", a["text"]) for a in asr]
-                names["S1"] = "Others" if mic_tracks else "Speaker"
-            segments += segs
-            base += span_each
-            del audio
-
-        mine: list[E.Segment] = []
-        for path in mic_tracks:
-            phase(0.95 - mic_share, mic_share)
-            prog(0, "Transcribing your microphone…")
-            asr, d = E.transcribe(whisper, path, words=False,
-                                  progress=lambda f: prog(f, f"Transcribing your microphone… {int(f * 100)}%"))
-            duration = max(duration, d)
-            mine += [E.Segment(a["start"], a["end"], E.ME, a["text"]) for a in asr]
-        if mic_tracks:
-            names[E.ME] = settings.get("your_name") or "Me"
-            mine = E.remove_echo(mine, segments)
-
-        merged = sorted(segments + mine, key=lambda s: s.start)
-        used = {s.speaker for s in merged}
-        fingerprints = {k: v for k, v in fingerprints.items() if k in used}
-        book = E.VoiceBook()
-        matches = book.match(fingerprints)
-        for k, n in matches.items():
-            names.setdefault(k, n)
-
-        # Work out names from how people address each other ("Alan, how's the grading plan?")
-        guessed: dict = {}
-        if settings.get("guess_names", True):
-            prog(1.0, "Working out who is who…")
-            for k, g in E.guess_names(merged, names, set(book.names())).items():
-                names[k] = g["name"]
-                guessed[k] = g
-            remaining = [k for k in dict.fromkeys(s.speaker for s in merged)
-                         if k.startswith("S") and not names.get(k)]
-            # Only fast remote/Ollama AI double-checks names; the built-in model would add minutes.
-            provider = settings.get("ai_provider", "local")
-            ai_ready = provider == "ollama" or (provider == "claude" and bool(E.get_api_key()))
-            if remaining and opts["summary"] and ai_ready:   # the transcript is going to the AI anyway
-                tmp = {"title": m["title"], "started": m["started"], "names": names,
-                       "segments": [[s.start, s.end, s.speaker, s.text] for s in merged]}
-                try:
-                    for k, g in E.ai_guess_names(tmp, settings, remaining).items():
-                        names[k] = g["name"]
-                        guessed[k] = g
-                except Exception as e:
-                    self.post("note", folder, f"AI name check skipped: {e}")
-
-        m = E.read_meeting(Path(folder))
-        m.update(segments=[[round(s.start, 2), round(s.end, 2), s.speaker, s.text] for s in merged],
-                 names=names, fingerprints=fingerprints, auto_named=sorted(matches),
-                 guessed=guessed, names_confirmed=False,
-                 duration=duration, status="ready")
-        m.pop("summary", None)
-        need_names = bool(unnamed_speakers(m))
-        if opts["summary"] and merged:
-            if need_names and live:
-                m["summary_pending"] = True
-            else:
-                m["status"] = "summarizing"
-        E.write_meeting(m)
-        prog(1.0, "Saving notes…")
-        E.export_files(m)
-        E.write_meeting(m)
-
-        if not opts["audio"] and not m.get("imported"):
-            for t in m["tracks"]:
-                try:
-                    track_path(m, t).unlink()
-                except OSError:
-                    pass
-            m["audio_deleted"] = True
-            E.write_meeting(m)
-
-        self.post("processed", folder, need_names and live)
-        if m["status"] == "summarizing":
-            self._summarize(folder)
-
-    def _summarize(self, folder: str):
-        m = E.read_meeting(Path(folder))
-        m["status"] = "summarizing"
-        E.write_meeting(m)
-        self.post("progress", folder, 5, "Writing the AI summary…")
-        self.post("refresh", folder)
-        last = {"text": "Writing the AI summary…", "pct": 5.0}
-
-        def log(text):
-            last["text"] = text
-            self.post("progress", folder, last["pct"], text)
-
-        def progress(frac):
-            last["pct"] = 5 + 95 * frac
-            self.post("progress", folder, last["pct"], last["text"])
-        try:
-            summary = E.summarize(m, dict(self.settings), log=log, progress=progress)
-        except Exception as e:
-            m = E.read_meeting(Path(folder))
-            m["status"] = "ready"
-            E.write_meeting(m)
-            self.post("error", folder, f"The transcript is saved, but the AI summary failed: {e}")
-            return
-        m = E.read_meeting(Path(folder))
-        m["summary"] = summary
-        m["status"] = "ready"
-        m.pop("summary_pending", None)
-        E.export_files(m)
-        E.write_meeting(m)
 
     def _poll(self):
         changed = set()
@@ -2492,6 +2271,8 @@ def selftest() -> int:
 
 
 def main():
+    import multiprocessing
+    multiprocessing.freeze_support()   # Tableside.exe also runs the background worker
     E.APP_DATA.mkdir(parents=True, exist_ok=True)
     if "--selftest" in sys.argv:
         sys.exit(selftest())
@@ -2534,6 +2315,8 @@ def main():
 
     root.report_callback_exception = report
     root.mainloop()
+    if app.jobs is not None:
+        app.jobs.stop()
     try:
         PORT_FILE.unlink()
     except OSError:
