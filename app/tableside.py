@@ -876,9 +876,9 @@ class App:
         folder = E.NOTES_ROOT / f"{started:%Y-%m-%d %H%M%S} {E.safe_name(title)}"
         folder.mkdir(parents=True, exist_ok=True)
 
-        recs = [R.StreamRecorder(self.pa, spk, folder / "meeting_audio.wav", "meeting")]
+        recs = [R.StreamRecorder(self.pa, spk, folder / "meeting audio.wav", "meeting")]
         if mic:
-            recs.append(R.StreamRecorder(self.pa, mic, folder / "my_mic.wav", "me"))
+            recs.append(R.StreamRecorder(self.pa, mic, folder / "my mic.wav", "me"))
         try:
             for r in recs:
                 r.open()

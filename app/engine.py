@@ -1532,22 +1532,38 @@ def export_docx(path: Path, title: str, started: dt.datetime, duration: float,
 def export_xlsx(path: Path, title: str, started: dt.datetime, duration: float,
                 speakers: list[str], summary: dict | None, segments: list[Segment] | None) -> None:
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, Side
 
-    normal = Font(name=EXCEL_FONT[0], size=EXCEL_FONT[1])
-    bold = Font(name=EXCEL_FONT[0], size=EXCEL_FONT[1], bold=True)
-    fill = PatternFill("solid", fgColor="FDE3D6")
+    # House style: Times New Roman 11, no shading, bold black headers,
+    # thick outside border + dotted inside borders on each table, gridlines on,
+    # negative numbers red in parentheses.
+    normal = Font(name=EXCEL_FONT[0], size=EXCEL_FONT[1], color="000000")
+    bold = Font(name=EXCEL_FONT[0], size=EXCEL_FONT[1], bold=True, color="000000")
     wrap_top = Alignment(vertical="top", wrap_text=True)
+    thick, dotted = Side(style="thick", color="000000"), Side(style="dotted", color="000000")
+    number_format = "#,##0.00;[Red](#,##0.00)"
 
     def style(ws, header=True, wrap_cols=()):
+        ws.sheet_view.showGridLines = True
         for row in ws.iter_rows():
             for cell in row:
                 cell.font = normal
                 cell.alignment = wrap_top if cell.column in wrap_cols else Alignment(vertical="top")
+                if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                    cell.number_format = number_format
         if header:
             for cell in ws[1]:
                 cell.font = bold
-                cell.fill = fill
+
+    def box(ws):
+        """Thick outside border and dotted inside borders around the sheet's table."""
+        top, bottom, left, right = 1, ws.max_row, 1, ws.max_column
+        for row in ws.iter_rows(min_row=top, max_row=bottom, min_col=left, max_col=right):
+            for cell in row:
+                cell.border = Border(top=thick if cell.row == top else dotted,
+                                     bottom=thick if cell.row == bottom else dotted,
+                                     left=thick if cell.column == left else dotted,
+                                     right=thick if cell.column == right else dotted)
 
     wb = Workbook()
     first = wb.active
@@ -1576,6 +1592,7 @@ def export_xlsx(path: Path, title: str, started: dt.datetime, duration: float,
         for a in summary.get("action_items") or []:
             ai.append([a["owner"], a["task"], a["due"], ""])
         style(ai, wrap_cols=(2,))
+        box(ai)
         for col, width in zip("ABCD", (18, 80, 18, 8)):
             ai.column_dimensions[col].width = width
         ai.freeze_panes = "A2"
@@ -1588,6 +1605,7 @@ def export_xlsx(path: Path, title: str, started: dt.datetime, duration: float,
         for s in segments:
             ws.append([fmt_time(s.start), fmt_time(s.end), s.speaker, s.text])
         style(ws, wrap_cols=(4,))
+        box(ws)
         for col, width in zip("ABCD", (10, 10, 18, 100)):
             ws.column_dimensions[col].width = width
         ws.freeze_panes = "A2"
@@ -1598,6 +1616,7 @@ def export_xlsx(path: Path, title: str, started: dt.datetime, duration: float,
               ("Length", fmt_time(duration)), ("Speakers", ", ".join(speakers) or "-")):
         info.append(list(r))
     style(info, header=False)
+    box(info)
     for row in info.iter_rows():
         row[0].font = bold
     info.column_dimensions["A"].width = 12

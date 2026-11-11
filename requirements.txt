@@ -1,6 +1,7 @@
 # Runtime
 pyaudiowpatch>=0.2.12; sys_platform == "win32"
 faster-whisper>=1.1
+huggingface_hub>=0.23    # downloads the built-in summary AI
 av>=12,<19            # av 19 breaks faster-whisper's audio decoding
 onnxruntime>=1.20
 sherpa-onnx>=1.12
